@@ -1,0 +1,35 @@
+services:
+  gold-mcp:
+    build: .
+    container_name: gold-advisor-mcp
+    restart: unless-stopped
+    environment:
+      - FREEGOLDAPI_KEY=${FREEGOLDAPI_KEY:-}
+      - METALSDEV_KEY=${METALSDEV_KEY:-}
+      - GOLDAPI_KEY=${GOLDAPI_KEY:-}
+      - LOG_LEVEL=${LOG_LEVEL:-INFO}
+      - PYTHONPATH=/app
+    volumes:
+      - gold_data:/app/data
+      - ./config.yaml:/app/config.yaml:ro
+    stdin_open: true
+    tty: true
+
+  backfill:
+    build: .
+    container_name: gold-advisor-backfill
+    profiles:
+      - tools
+    environment:
+      - FREEGOLDAPI_KEY=${FREEGOLDAPI_KEY:-}
+      - METALSDEV_KEY=${METALSDEV_KEY:-}
+      - GOLDAPI_KEY=${GOLDAPI_KEY:-}
+      - PYTHONPATH=/app
+    volumes:
+      - gold_data:/app/data
+      - ./config.yaml:/app/config.yaml:ro
+    command: ["python", "scripts/backfill_history.py", "--days", "365"]
+
+volumes:
+  gold_data:
+    driver: local

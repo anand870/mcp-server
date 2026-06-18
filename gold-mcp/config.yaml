@@ -1,0 +1,54 @@
+server:
+  name: gold-advisor
+  version: "1.0.0"
+  description: "Gold price intelligence and buy-opportunity analysis MCP server"
+
+database:
+  path: data/gold.db
+
+providers:
+  current_price_order:
+    - goldapi
+    - metalsdev
+    - yahoofinance
+    - freegoldapi
+  historical_order:
+    - yahoofinance
+    - freegoldapi
+    - metalsdev
+    - goldapi
+  retry:
+    attempts: 3
+    wait_min: 1
+    wait_max: 5
+    wait_multiplier: 1.5
+
+indicators:
+  ma_periods:
+    - 7
+    - 30
+    - 90
+  rsi_period: 14
+
+scoring:
+  rules:
+    price_below_ma30: 40
+    price_below_ma90: 20
+    rsi_below_35: 20
+    ma7_above_ma30: 20
+  thresholds:
+    avoid_max: 30
+    wait_max: 60
+    buy_max: 80
+    strong_buy_max: 100
+
+cache:
+  price_ttl_seconds: 300
+  indicators_ttl_seconds: 3600
+
+logging:
+  level: INFO
+  format: json
+  log_file: data/gold-mcp.log
+  log_file_max_bytes: 5000000
+  log_file_backup_count: 3
