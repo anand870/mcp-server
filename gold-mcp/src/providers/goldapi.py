@@ -4,7 +4,7 @@ from datetime import date, timedelta
 
 import httpx
 
-from src.providers.base import GoldProvider, HistoricalEntry, PriceResult
+from src.providers.base import TROY_OZ_PER_GRAM, GoldProvider, HistoricalEntry, PriceResult, derive_carat_prices
 from src.utils.logging import get_logger
 
 logger = get_logger(__name__)
@@ -40,19 +40,32 @@ class GoldAPIProvider(GoldProvider):
             response.raise_for_status()
             data = response.json()
 
-        price = float(data.get("price") or data.get("price_gram_24k") or 0)
-        if price <= 0:
-            raise ValueError(f"GoldAPI returned invalid price: {data}")
+        # price_gram_24k is already per gram; price is per troy oz
+        price_gram = data.get("price_gram_24k")
+        if price_gram:
+            price = round(float(price_gram), 4)
+        else:
+            price_toz = float(data.get("price") or 0)
+            if price_toz <= 0:
+                raise ValueError(f"GoldAPI returned invalid price: {data}")
+            price = round(price_toz / TROY_OZ_PER_GRAM, 4)
+
+        def _to_gram(v):
+            return round(float(v) / TROY_OZ_PER_GRAM, 4) if v else None
 
         today = date.today().isoformat()
         logger.info("goldapi_current_price_fetched", price=price, date=today)
         return PriceResult(
-            price_usd=price,
-            date=today,
+            price=price,
+            currency="USD",
+            carat="24K",
             source=self.name,
-            open_usd=data.get("open_price"),
-            high_usd=data.get("high_price"),
-            low_usd=data.get("low_price"),
+            price_type="local",
+            date=today,
+            carat_prices=derive_carat_prices(price),
+            open=_to_gram(data.get("open_price")),
+            high=_to_gram(data.get("high_price")),
+            low=_to_gram(data.get("low_price")),
         )
 
     async def get_historical(self, days: int) -> list[HistoricalEntry]:
@@ -73,15 +86,21 @@ class GoldAPIProvider(GoldProvider):
                     response.raise_for_status()
                     data = response.json()
 
-                price = float(data.get("price") or data.get("close_price") or 0)
-                if price > 0:
+                price_toz = float(data.get("price") or data.get("close_price") or 0)
+                if price_toz > 0:
+                    def _g(v):
+                        return round(float(v) / TROY_OZ_PER_GRAM, 4) if v else None
                     entries.append(HistoricalEntry(
                         date=current.isoformat(),
-                        price_usd=price,
-                        open_usd=data.get("open_price"),
-                        high_usd=data.get("high_price"),
-                        low_usd=data.get("low_price"),
+                        price=round(price_toz / TROY_OZ_PER_GRAM, 4),
+                        currency="USD",
+                        carat="24K",
+                        price_type="local",
+                        calculated=False,
                         source=self.name,
+                        open=_g(data.get("open_price")),
+                        high=_g(data.get("high_price")),
+                        low=_g(data.get("low_price")),
                     ))
             except Exception as exc:
                 logger.warning("goldapi_historical_day_failed", date=current.isoformat(), error=str(exc))

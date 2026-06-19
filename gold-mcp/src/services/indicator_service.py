@@ -1,7 +1,5 @@
 from __future__ import annotations
 
-from datetime import date, timedelta
-
 import numpy as np
 import pandas as pd
 
@@ -19,10 +17,13 @@ def _compute_rsi(prices: pd.Series, period: int = 14) -> pd.Series:
     avg_gain = gain.ewm(com=period - 1, min_periods=period).mean()
     avg_loss = loss.ewm(com=period - 1, min_periods=period).mean()
     rs = avg_gain / avg_loss.replace(0, np.nan)
-    return 100 - (100 / (1 + rs))
+    rsi = 100 - (100 / (1 + rs))
+    # Pure uptrend (no losses) → RSI = 100; pure downtrend (no gains) → RSI = 0
+    rsi = rsi.where(avg_loss != 0, np.where(avg_gain > 0, 100.0, np.nan))
+    return pd.Series(rsi, index=prices.index)
 
 
-def _determine_trend(price: float, ma7: float | None, ma30: float | None, ma90: float | None) -> str:
+def _determine_trend(price: float, ma7: float | None, ma30: float | None, ma90: float | None = None) -> str:  # noqa: ARG001
     if ma7 is not None and ma30 is not None:
         if price > ma7 > ma30:
             return "Bullish"
@@ -36,11 +37,13 @@ def _determine_trend(price: float, ma7: float | None, ma30: float | None, ma90: 
 
 
 class IndicatorService:
+    """Computes and stores technical indicators. Always operates on USD 24K prices."""
+
     def compute_and_store(self) -> int:
         with session_scope() as session:
             price_repo = GoldPriceRepository(session)
-            records = price_repo.get_last_n_days(200)
-            raw = [(r.date, r.price_usd) for r in records]
+            records = price_repo.get_last_n_days(200, currency="USD", carat="24K")
+            raw = [(r.date, r.price) for r in records]
 
         if len(raw) < 7:
             logger.warning("indicator_service_insufficient_data", count=len(raw))
@@ -75,13 +78,13 @@ class IndicatorService:
         with session_scope() as session:
             price_repo = GoldPriceRepository(session)
             ind_repo = GoldIndicatorRepository(session)
-            latest_price = price_repo.get_latest()
+            latest_price = price_repo.get_latest(currency="USD", carat="24K")
             latest_ind = ind_repo.get_latest()
 
             if latest_price is None:
                 return None
 
-            price = latest_price.price_usd
+            price = latest_price.price
             today = latest_price.date
 
             ma7 = latest_ind.ma7 if latest_ind else None
@@ -93,7 +96,7 @@ class IndicatorService:
 
         return GoldIndicatorsResponse(
             date=today,
-            price_usd=price,
+            price_usd_gram=price,
             ma7=ma7,
             ma30=ma30,
             ma90=ma90,

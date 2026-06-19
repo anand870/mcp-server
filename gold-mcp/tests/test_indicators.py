@@ -54,10 +54,10 @@ def test_compute_and_store_requires_data():
 def test_compute_and_store_with_sufficient_data():
     with session_scope() as session:
         repo = GoldPriceRepository(session)
+        from datetime import date, timedelta
         for i in range(100):
-            from datetime import date, timedelta
             d = (date(2024, 1, 1) + timedelta(days=i)).isoformat()
-            repo.upsert(d, 2000.0 + i * 0.5, "test")
+            repo.upsert(d, 2000.0 + i * 0.5, "USD", "24K", "test")
 
     svc = IndicatorService()
     count = svc.compute_and_store()

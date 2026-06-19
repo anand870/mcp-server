@@ -2,11 +2,10 @@ from __future__ import annotations
 
 import json
 from contextlib import contextmanager
-from datetime import date
 from pathlib import Path
 from typing import Generator
 
-from sqlalchemy import create_engine, text
+from sqlalchemy import create_engine
 from sqlalchemy.orm import Session, sessionmaker
 
 from src.config import get_config
@@ -60,64 +59,104 @@ class GoldPriceRepository:
     def __init__(self, session: Session):
         self.session = session
 
-    def upsert(self, date_str: str, price_usd: float, source: str,
-               open_usd: float | None = None, high_usd: float | None = None,
-               low_usd: float | None = None) -> GoldPrice:
-        existing = self.session.query(GoldPrice).filter_by(date=date_str).first()
+    def upsert(
+        self,
+        date_str: str,
+        price: float,
+        currency: str,
+        carat: str,
+        source: str,
+        price_type: str = "local",
+        calculated: bool = False,
+        open: float | None = None,
+        high: float | None = None,
+        low: float | None = None,
+    ) -> GoldPrice:
+        existing = (
+            self.session.query(GoldPrice)
+            .filter_by(date=date_str, currency=currency, carat=carat)
+            .first()
+        )
         if existing:
-            existing.price_usd = price_usd
+            existing.price = price
             existing.source = source
-            if open_usd is not None:
-                existing.open_usd = open_usd
-            if high_usd is not None:
-                existing.high_usd = high_usd
-            if low_usd is not None:
-                existing.low_usd = low_usd
+            existing.price_type = price_type
+            existing.calculated = calculated
+            if open is not None:
+                existing.open = open
+            if high is not None:
+                existing.high = high
+            if low is not None:
+                existing.low = low
             return existing
         record = GoldPrice(
             date=date_str,
-            price_usd=price_usd,
-            open_usd=open_usd,
-            high_usd=high_usd,
-            low_usd=low_usd,
+            currency=currency,
+            carat=carat,
+            price=price,
+            open=open,
+            high=high,
+            low=low,
             source=source,
+            price_type=price_type,
+            calculated=calculated,
         )
         self.session.add(record)
         return record
 
-    def get_latest(self) -> GoldPrice | None:
+    def get_latest(self, currency: str = "USD", carat: str = "24K") -> GoldPrice | None:
         return (
             self.session.query(GoldPrice)
+            .filter_by(currency=currency, carat=carat)
             .order_by(GoldPrice.date.desc())
             .first()
         )
 
-    def get_range(self, start_date: str, end_date: str) -> list[GoldPrice]:
+    def get_range(
+        self, start_date: str, end_date: str, currency: str = "USD", carat: str = "24K"
+    ) -> list[GoldPrice]:
         return (
             self.session.query(GoldPrice)
-            .filter(GoldPrice.date >= start_date, GoldPrice.date <= end_date)
+            .filter(
+                GoldPrice.date >= start_date,
+                GoldPrice.date <= end_date,
+                GoldPrice.currency == currency,
+                GoldPrice.carat == carat,
+            )
             .order_by(GoldPrice.date.asc())
             .all()
         )
 
-    def get_last_n_days(self, n: int) -> list[GoldPrice]:
+    def get_last_n_days(self, n: int, currency: str = "USD", carat: str = "24K") -> list[GoldPrice]:
         return (
             self.session.query(GoldPrice)
+            .filter_by(currency=currency, carat=carat)
             .order_by(GoldPrice.date.desc())
             .limit(n)
             .all()
         )
 
-    def count(self) -> int:
-        return self.session.query(GoldPrice).count()
+    def count(self, currency: str | None = None, carat: str | None = None) -> int:
+        q = self.session.query(GoldPrice)
+        if currency:
+            q = q.filter_by(currency=currency)
+        if carat:
+            q = q.filter_by(carat=carat)
+        return q.count()
 
 
 class GoldIndicatorRepository:
     def __init__(self, session: Session):
         self.session = session
 
-    def upsert(self, date_str: str, ma7: float | None, ma30: float | None,
-               ma90: float | None, rsi14: float | None) -> GoldIndicator:
+    def upsert(
+        self,
+        date_str: str,
+        ma7: float | None,
+        ma30: float | None,
+        ma90: float | None,
+        rsi14: float | None,
+    ) -> GoldIndicator:
         existing = self.session.query(GoldIndicator).filter_by(date=date_str).first()
         if existing:
             existing.ma7 = ma7
@@ -149,8 +188,15 @@ class RecommendationRepository:
     def __init__(self, session: Session):
         self.session = session
 
-    def save(self, date_str: str, price_usd: float, score: int,
-             recommendation: str, reasoning: str, score_breakdown: dict) -> RecommendationHistory:
+    def save(
+        self,
+        date_str: str,
+        price_usd: float,
+        score: int,
+        recommendation: str,
+        reasoning: str,
+        score_breakdown: dict,
+    ) -> RecommendationHistory:
         record = RecommendationHistory(
             date=date_str,
             price_usd=price_usd,

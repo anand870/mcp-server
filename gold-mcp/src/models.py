@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from datetime import datetime
 
-from sqlalchemy import DateTime, Float, Index, Integer, String, Text, UniqueConstraint
+from sqlalchemy import Boolean, DateTime, Float, Index, Integer, String, Text, UniqueConstraint
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
 from sqlalchemy.sql import func
 
@@ -16,17 +16,22 @@ class GoldPrice(Base):
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
     date: Mapped[str] = mapped_column(String(10), nullable=False)
-    price_usd: Mapped[float] = mapped_column(Float, nullable=False)
-    open_usd: Mapped[float | None] = mapped_column(Float, nullable=True)
-    high_usd: Mapped[float | None] = mapped_column(Float, nullable=True)
-    low_usd: Mapped[float | None] = mapped_column(Float, nullable=True)
+    currency: Mapped[str] = mapped_column(String(10), nullable=False, default="USD")
+    carat: Mapped[str] = mapped_column(String(5), nullable=False, default="24K")
+    price: Mapped[float] = mapped_column(Float, nullable=False)
+    open: Mapped[float | None] = mapped_column(Float, nullable=True)
+    high: Mapped[float | None] = mapped_column(Float, nullable=True)
+    low: Mapped[float | None] = mapped_column(Float, nullable=True)
     source: Mapped[str] = mapped_column(String(50), nullable=False)
+    price_type: Mapped[str] = mapped_column(String(20), nullable=False, default="local")
+    calculated: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
     created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())
     updated_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now(), onupdate=func.now())
 
     __table_args__ = (
-        UniqueConstraint("date", name="uq_gold_prices_date"),
+        UniqueConstraint("date", "currency", "carat", name="uq_gold_prices_date_currency_carat"),
         Index("ix_gold_prices_date", "date"),
+        Index("ix_gold_prices_currency_carat", "currency", "carat"),
     )
 
 

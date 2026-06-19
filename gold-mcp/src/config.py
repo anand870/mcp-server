@@ -1,14 +1,12 @@
 from __future__ import annotations
 
-import os
 from pathlib import Path
 from typing import Any
 
-# Root of the gold-mcp project, regardless of the process cwd
 _PROJECT_ROOT = Path(__file__).parent.parent.resolve()
 
 import yaml
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -19,10 +17,30 @@ class RetryConfig(BaseModel):
     wait_multiplier: float = 1.5
 
 
+class CurrencyConfig(BaseModel):
+    enabled: bool = True
+
+
 class ProvidersConfig(BaseModel):
-    current_price_order: list[str] = ["goldapi", "metalsdev", "yahoofinance", "freegoldapi"]
-    historical_order: list[str] = ["yahoofinance", "freegoldapi"]
+    currency_order: dict[str, list[str]] = Field(
+        default_factory=lambda: {
+            "USD": ["freegoldapi", "metalsdev", "goldapi", "yahoofinance"],
+            "AED": ["igold", "dubaicityofgold", "usd_conversion"],
+            "INR": ["metalsdev_inr", "usd_conversion"],
+        }
+    )
+    historical_order: dict[str, list[str]] = Field(
+        default_factory=lambda: {
+            "USD": ["yahoofinance", "freegoldapi", "metalsdev", "goldapi"],
+            "AED": ["usd_conversion"],
+            "INR": ["metalsdev_inr", "usd_conversion"],
+        }
+    )
     retry: RetryConfig = RetryConfig()
+
+
+class FXConfig(BaseModel):
+    cache_ttl_seconds: int = 3600
 
 
 class IndicatorsConfig(BaseModel):
@@ -60,8 +78,13 @@ class DatabaseConfig(BaseModel):
 
 class ServerConfig(BaseModel):
     name: str = "gold-advisor"
-    version: str = "1.0.0"
+    version: str = "2.0.0"
     description: str = "Gold price intelligence and buy-opportunity analysis MCP server"
+
+
+class HTTPConfig(BaseModel):
+    host: str = "0.0.0.0"
+    port: int = 8080
 
 
 class LoggingConfig(BaseModel):
@@ -75,11 +98,26 @@ class LoggingConfig(BaseModel):
 class AppConfig(BaseModel):
     server: ServerConfig = ServerConfig()
     database: DatabaseConfig = DatabaseConfig()
+    default_currency: str = "AED"
+    default_carat: str = "24K"
+    currencies: dict[str, CurrencyConfig] = Field(
+        default_factory=lambda: {
+            "USD": CurrencyConfig(),
+            "AED": CurrencyConfig(),
+            "INR": CurrencyConfig(),
+        }
+    )
+    carats: list[str] = ["24K", "22K", "21K", "18K"]
     providers: ProvidersConfig = ProvidersConfig()
+    fx: FXConfig = FXConfig()
     indicators: IndicatorsConfig = IndicatorsConfig()
     scoring: ScoringConfig = ScoringConfig()
     cache: CacheConfig = CacheConfig()
+    http: HTTPConfig = HTTPConfig()
     logging: LoggingConfig = LoggingConfig()
+
+    def enabled_currencies(self) -> list[str]:
+        return [c for c, cfg in self.currencies.items() if cfg.enabled]
 
 
 class Settings(BaseSettings):

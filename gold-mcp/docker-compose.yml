@@ -15,6 +15,25 @@ services:
     stdin_open: true
     tty: true
 
+  gold-http:
+    build: .
+    container_name: gold-advisor-http
+    restart: unless-stopped
+    command: ["python", "-m", "src.main", "--http"]
+    ports:
+      - "${HTTP_PORT:-8080}:8080"
+    environment:
+      - FREEGOLDAPI_KEY=${FREEGOLDAPI_KEY:-}
+      - METALSDEV_KEY=${METALSDEV_KEY:-}
+      - GOLDAPI_KEY=${GOLDAPI_KEY:-}
+      - LOG_LEVEL=${LOG_LEVEL:-INFO}
+      - PYTHONPATH=/app
+    volumes:
+      - gold_data:/app/data
+      - ./config.yaml:/app/config.yaml:ro
+    profiles:
+      - http
+
   backfill:
     build: .
     container_name: gold-advisor-backfill
@@ -29,6 +48,18 @@ services:
       - gold_data:/app/data
       - ./config.yaml:/app/config.yaml:ro
     command: ["python", "scripts/backfill_history.py", "--days", "365"]
+
+  migrate:
+    build: .
+    container_name: gold-advisor-migrate
+    profiles:
+      - tools
+    environment:
+      - PYTHONPATH=/app
+    volumes:
+      - gold_data:/app/data
+      - ./config.yaml:/app/config.yaml:ro
+    command: ["python", "scripts/migrate_db.py"]
 
 volumes:
   gold_data:

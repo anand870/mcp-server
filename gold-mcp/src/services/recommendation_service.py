@@ -1,10 +1,8 @@
 from __future__ import annotations
 
-from datetime import date
-
 from src.config import get_config
 from src.database import RecommendationRepository, session_scope
-from src.schemas import BuyOpportunityResponse, GoldIndicatorsResponse, ScoreBreakdown
+from src.schemas import BuyOpportunityResponse, ScoreBreakdown
 from src.services.gold_service import GoldService
 from src.services.indicator_service import IndicatorService
 from src.utils.logging import get_logger
@@ -27,18 +25,24 @@ class RecommendationService:
         self._gold_svc = GoldService()
         self._ind_svc = IndicatorService()
 
-    async def analyze_buy_opportunity(self) -> BuyOpportunityResponse:
+    async def analyze_buy_opportunity(
+        self, currency: str | None = None, carat: str | None = None
+    ) -> BuyOpportunityResponse:
         config = get_config()
         rules = config.scoring.rules
         thresholds = config.scoring.thresholds
 
-        price_resp = await self._gold_svc.get_current_price()
+        # Price in the requested currency/carat (for display)
+        price_resp = await self._gold_svc.get_current_price(currency=currency, carat=carat)
+
+        # Indicators and scoring always use USD 24K
+        usd_price_resp = await self._gold_svc.get_current_price(currency="USD", carat="24K")
         indicators = self._ind_svc.get_latest_indicators()
 
         if indicators is None:
             raise RuntimeError("No indicators available. Run scripts/refresh_history.py first.")
 
-        price = price_resp.price_usd
+        usd_price = usd_price_resp.price
         ma30 = indicators.ma30
         ma90 = indicators.ma90
         rsi14 = indicators.rsi14
@@ -53,17 +57,17 @@ class RecommendationService:
         )
         reasoning: list[str] = []
 
-        if ma30 is not None and price < ma30:
+        if ma30 is not None and usd_price < ma30:
             breakdown.price_below_ma30 = rules.price_below_ma30
-            reasoning.append(f"Price ${price:.2f} is below MA30 ${ma30:.2f} (+{rules.price_below_ma30} pts)")
+            reasoning.append(f"USD price ${usd_price:.4f}/g is below MA30 ${ma30:.4f}/g (+{rules.price_below_ma30} pts)")
         elif ma30 is not None:
-            reasoning.append(f"Price ${price:.2f} is above MA30 ${ma30:.2f} (+0 pts)")
+            reasoning.append(f"USD price ${usd_price:.4f}/g is above MA30 ${ma30:.4f}/g (+0 pts)")
 
-        if ma90 is not None and price < ma90:
+        if ma90 is not None and usd_price < ma90:
             breakdown.price_below_ma90 = rules.price_below_ma90
-            reasoning.append(f"Price ${price:.2f} is below MA90 ${ma90:.2f} (+{rules.price_below_ma90} pts)")
+            reasoning.append(f"USD price ${usd_price:.4f}/g is below MA90 ${ma90:.4f}/g (+{rules.price_below_ma90} pts)")
         elif ma90 is not None:
-            reasoning.append(f"Price ${price:.2f} is above MA90 ${ma90:.2f} (+0 pts)")
+            reasoning.append(f"USD price ${usd_price:.4f}/g is above MA90 ${ma90:.4f}/g (+0 pts)")
 
         if rsi14 is not None and rsi14 < 35:
             breakdown.rsi_below_35 = rules.rsi_below_35
@@ -73,9 +77,9 @@ class RecommendationService:
 
         if ma7 is not None and ma30 is not None and ma7 > ma30:
             breakdown.ma7_above_ma30 = rules.ma7_above_ma30
-            reasoning.append(f"MA7 ${ma7:.2f} is above MA30 ${ma30:.2f} — momentum rising (+{rules.ma7_above_ma30} pts)")
+            reasoning.append(f"MA7 ${ma7:.4f}/g is above MA30 ${ma30:.4f}/g — momentum rising (+{rules.ma7_above_ma30} pts)")
         elif ma7 is not None and ma30 is not None:
-            reasoning.append(f"MA7 ${ma7:.2f} is below MA30 ${ma30:.2f} — momentum declining (+0 pts)")
+            reasoning.append(f"MA7 ${ma7:.4f}/g is below MA30 ${ma30:.4f}/g — momentum declining (+0 pts)")
 
         score = (
             breakdown.price_below_ma30
@@ -98,7 +102,7 @@ class RecommendationService:
             repo = RecommendationRepository(session)
             repo.save(
                 date_str=price_resp.date,
-                price_usd=price,
+                price_usd=usd_price,
                 score=score,
                 recommendation=recommendation,
                 reasoning="; ".join(reasoning),
@@ -109,12 +113,17 @@ class RecommendationService:
             "recommendation_generated",
             score=score,
             recommendation=recommendation,
-            price=price,
+            price=price_resp.price,
+            currency=price_resp.currency,
+            carat=price_resp.carat,
         )
 
         return BuyOpportunityResponse(
             date=price_resp.date,
-            price_usd=price,
+            price=price_resp.price,
+            currency=price_resp.currency,
+            carat=price_resp.carat,
+            price_usd_gram=usd_price,
             score=score,
             recommendation=recommendation,
             reasoning=reasoning,

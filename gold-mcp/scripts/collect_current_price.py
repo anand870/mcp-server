@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Fetch the current gold price and persist it to the database.
+Fetch the current gold price for all enabled currencies and persist to the database.
 Designed to run frequently (e.g. every 5 minutes via cron).
 
 Usage:
@@ -29,15 +29,27 @@ async def collect() -> None:
     logger.info("collect_start")
 
     svc = GoldService()
-    result = await svc.get_current_price()
+    currencies = config.enabled_currencies()
 
-    logger.info(
-        "collect_success",
-        price=result.price_usd,
-        date=result.date,
-        source=result.source,
-    )
-    print(f"Collected: ${result.price_usd:,.2f} on {result.date} from {result.source}")
+    for currency in currencies:
+        try:
+            result = await svc.get_current_price(currency=currency, carat="24K")
+            logger.info(
+                "collect_success",
+                currency=result.currency,
+                price=result.price,
+                date=result.date,
+                source=result.source,
+                price_type=result.price_type,
+            )
+            carats_info = ", ".join(
+                f"{cp['carat']}={cp['price']:.2f}{'*' if cp['calculated'] else ''}"
+                for cp in result.all_carats
+            )
+            print(f"[{currency}] {result.source} ({result.price_type}): {carats_info} on {result.date}")
+        except Exception as exc:
+            logger.warning("collect_failed", currency=currency, error=str(exc))
+            print(f"[{currency}] FAILED: {exc}", file=sys.stderr)
 
 
 def main() -> None:

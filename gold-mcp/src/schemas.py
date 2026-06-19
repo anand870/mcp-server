@@ -1,29 +1,40 @@
 from __future__ import annotations
 
-from typing import Any
-
 from pydantic import BaseModel, Field
 
 
+class CaratPriceDetail(BaseModel):
+    carat: str
+    price: float
+    calculated: bool
+
+
 class GoldPriceResponse(BaseModel):
-    price_usd: float
-    currency: str = "USD"
-    unit: str = "troy_oz"
+    price: float
+    currency: str
+    carat: str
+    price_type: str
+    unit: str = "gram"
     date: str
     source: str
     timestamp: str
-    open_usd: float | None = None
-    high_usd: float | None = None
-    low_usd: float | None = None
+    all_carats: list[CaratPriceDetail] = []
+    open: float | None = None
+    high: float | None = None
+    low: float | None = None
 
 
 class GoldHistoryEntry(BaseModel):
     date: str
-    price_usd: float
-    open_usd: float | None = None
-    high_usd: float | None = None
-    low_usd: float | None = None
+    price: float
+    currency: str
+    carat: str
+    price_type: str
+    unit: str = "gram"
     source: str
+    open: float | None = None
+    high: float | None = None
+    low: float | None = None
 
 
 class GoldHistoryResponse(BaseModel):
@@ -32,12 +43,16 @@ class GoldHistoryResponse(BaseModel):
     start_date: str
     end_date: str
     count: int
+    currency: str
+    carat: str
+    unit: str = "gram"
     source: str = "database"
 
 
 class GoldIndicatorsResponse(BaseModel):
     date: str
-    price_usd: float
+    price_usd_gram: float = Field(description="USD 24K spot price in per-gram units")
+    unit: str = "gram"
     ma7: float | None = None
     ma30: float | None = None
     ma90: float | None = None
@@ -56,7 +71,11 @@ class ScoreBreakdown(BaseModel):
 
 class BuyOpportunityResponse(BaseModel):
     date: str
-    price_usd: float
+    price: float
+    currency: str
+    carat: str
+    unit: str = "gram"
+    price_usd_gram: float = Field(description="USD 24K spot price in per-gram units used for scoring")
     score: int
     recommendation: str
     reasoning: list[str]
@@ -67,11 +86,11 @@ class BuyOpportunityResponse(BaseModel):
 
 class MarketSummaryResponse(BaseModel):
     text: str
-    price_usd: float
-    trend: str
-    rsi14: float | None
+    prices: dict[str, dict[str, CaratPriceDetail]]
     buy_score: int
     recommendation: str
+    trend: str
+    rsi14: float | None
     date: str
     source: str = "gold-advisor"
 

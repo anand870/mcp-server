@@ -1,27 +1,62 @@
 server:
   name: gold-advisor
-  version: "1.0.0"
+  version: "2.0.0"
   description: "Gold price intelligence and buy-opportunity analysis MCP server"
 
 database:
   path: data/gold.db
 
+default_currency: AED
+default_carat: 24K
+
+currencies:
+  USD:
+    enabled: true
+  AED:
+    enabled: true
+  INR:
+    enabled: true
+
+carats:
+  - 24K
+  - 22K
+  - 21K
+  - 18K
+
 providers:
-  current_price_order:
-    - goldapi
-    - metalsdev
-    - yahoofinance
-    - freegoldapi
+  currency_order:
+    USD:
+      - freegoldapi
+      - metalsdev
+      - goldapi
+      - yahoofinance
+    AED:
+      - igold
+      - dubaicityofgold
+      - usd_conversion
+    INR:
+      - khaleejtimes
+      - metalsdev_inr
+      - usd_conversion
   historical_order:
-    - yahoofinance
-    - freegoldapi
-    - metalsdev
-    - goldapi
+    USD:
+      - yahoofinance
+      - freegoldapi
+      - metalsdev
+      - goldapi
+    AED:
+      - usd_conversion
+    INR:
+      - metalsdev_inr
+      - usd_conversion
   retry:
     attempts: 3
     wait_min: 1
     wait_max: 5
     wait_multiplier: 1.5
+
+fx:
+  cache_ttl_seconds: 3600
 
 indicators:
   ma_periods:
@@ -45,6 +80,10 @@ scoring:
 cache:
   price_ttl_seconds: 300
   indicators_ttl_seconds: 3600
+
+http:
+  host: "0.0.0.0"
+  port: 8080
 
 logging:
   level: INFO

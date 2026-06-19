@@ -4,7 +4,7 @@ from datetime import date, timedelta
 
 import httpx
 
-from src.providers.base import GoldProvider, HistoricalEntry, PriceResult
+from src.providers.base import TROY_OZ_PER_GRAM, GoldProvider, HistoricalEntry, PriceResult, derive_carat_prices
 from src.utils.logging import get_logger
 
 logger = get_logger(__name__)
@@ -34,19 +34,34 @@ class FreeGoldAPIProvider(GoldProvider):
             response.raise_for_status()
             data = response.json()
 
-        price = float(data.get("price") or data.get("price_gram_24k") or data.get("price_troy_oz", 0))
-        if price <= 0:
-            raise ValueError(f"FreeGoldAPI returned invalid price: {data}")
+        # Prefer the native per-gram field; fall back to troy oz fields and convert
+        price_gram = data.get("price_gram_24k")
+        if price_gram:
+            price = float(price_gram)
+        else:
+            price_toz = float(data.get("price") or data.get("price_troy_oz", 0))
+            if price_toz <= 0:
+                raise ValueError(f"FreeGoldAPI returned invalid price: {data}")
+            price = price_toz / TROY_OZ_PER_GRAM
+
+        price = round(price, 4)
+
+        def _to_gram(v):
+            return round(float(v) / TROY_OZ_PER_GRAM, 4) if v else None
 
         today = date.today().isoformat()
         logger.info("freegoldapi_current_price_fetched", price=price, date=today)
         return PriceResult(
-            price_usd=price,
-            date=today,
+            price=price,
+            currency="USD",
+            carat="24K",
             source=self.name,
-            open_usd=data.get("open"),
-            high_usd=data.get("high"),
-            low_usd=data.get("low"),
+            price_type="local",
+            date=today,
+            carat_prices=derive_carat_prices(price),
+            open=_to_gram(data.get("open")),
+            high=_to_gram(data.get("high")),
+            low=_to_gram(data.get("low")),
         )
 
     async def get_historical(self, days: int) -> list[HistoricalEntry]:
@@ -73,11 +88,15 @@ class FreeGoldAPIProvider(GoldProvider):
             if d and p > 0:
                 entries.append(HistoricalEntry(
                     date=d,
-                    price_usd=p,
-                    open_usd=item.get("open"),
-                    high_usd=item.get("high"),
-                    low_usd=item.get("low"),
+                    price=p,
+                    currency="USD",
+                    carat="24K",
+                    price_type="local",
+                    calculated=False,
                     source=self.name,
+                    open=item.get("open"),
+                    high=item.get("high"),
+                    low=item.get("low"),
                 ))
 
         logger.info("freegoldapi_historical_fetched", count=len(entries), days=days)

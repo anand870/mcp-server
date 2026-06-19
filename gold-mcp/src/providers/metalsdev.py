@@ -4,7 +4,7 @@ from datetime import date, timedelta
 
 import httpx
 
-from src.providers.base import GoldProvider, HistoricalEntry, PriceResult
+from src.providers.base import GoldProvider, HistoricalEntry, PriceResult, derive_carat_prices
 from src.utils.logging import get_logger
 
 logger = get_logger(__name__)
@@ -13,10 +13,12 @@ METALSDEV_BASE = "https://api.metals.dev/v1"
 
 
 class MetalsDevProvider(GoldProvider):
-    name = "metalsdev"
+    """Metals.dev provider. Supports USD (default) and INR via the currency param."""
 
-    def __init__(self, api_key: str = ""):
+    def __init__(self, api_key: str = "", currency: str = "USD"):
         self.api_key = api_key
+        self.currency = currency
+        self.name = f"metalsdev" if currency == "USD" else f"metalsdev_{currency.lower()}"
 
     def supports_current_price(self) -> bool:
         return bool(self.api_key)
@@ -29,7 +31,7 @@ class MetalsDevProvider(GoldProvider):
             raise ValueError("Metals.dev requires an API key")
 
         url = f"{METALSDEV_BASE}/latest"
-        params = {"api_key": self.api_key, "currency": "USD", "unit": "toz"}
+        params = {"api_key": self.api_key, "currency": self.currency, "unit": "g"}
         async with httpx.AsyncClient(timeout=15.0) as client:
             response = await client.get(url, params=params)
             response.raise_for_status()
@@ -41,8 +43,17 @@ class MetalsDevProvider(GoldProvider):
             raise ValueError(f"Metals.dev returned invalid price: {data}")
 
         today = date.today().isoformat()
-        logger.info("metalsdev_current_price_fetched", price=price, date=today)
-        return PriceResult(price_usd=price, date=today, source=self.name)
+        price_type = "local" if self.currency == "USD" else "local"
+        logger.info("metalsdev_current_price_fetched", price=price, currency=self.currency, date=today)
+        return PriceResult(
+            price=price,
+            currency=self.currency,
+            carat="24K",
+            source=self.name,
+            price_type=price_type,
+            date=today,
+            carat_prices=derive_carat_prices(price),
+        )
 
     async def get_historical(self, days: int) -> list[HistoricalEntry]:
         if not self.api_key:
@@ -57,8 +68,8 @@ class MetalsDevProvider(GoldProvider):
             url = f"{METALSDEV_BASE}/historical"
             params = {
                 "api_key": self.api_key,
-                "currency": "USD",
-                "unit": "toz",
+                "currency": self.currency,
+                "unit": "g",
                 "date": current.isoformat(),
             }
             try:
@@ -72,7 +83,11 @@ class MetalsDevProvider(GoldProvider):
                 if price > 0:
                     entries.append(HistoricalEntry(
                         date=current.isoformat(),
-                        price_usd=price,
+                        price=price,
+                        currency=self.currency,
+                        carat="24K",
+                        price_type="local",
+                        calculated=False,
                         source=self.name,
                     ))
             except Exception as exc:
@@ -80,5 +95,5 @@ class MetalsDevProvider(GoldProvider):
 
             current += timedelta(days=1)
 
-        logger.info("metalsdev_historical_fetched", count=len(entries), days=days)
+        logger.info("metalsdev_historical_fetched", count=len(entries), currency=self.currency, days=days)
         return sorted(entries, key=lambda e: e.date)

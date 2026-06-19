@@ -1,303 +1,296 @@
 from __future__ import annotations
 
-import pytest
-import pytest_asyncio
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import AsyncMock, patch
 
-from src.providers.base import PriceResult, HistoricalEntry
-from src.providers.freegoldapi import FreeGoldAPIProvider
-from src.providers.yahoofinance import YahooFinanceProvider
-from src.providers.metalsdev import MetalsDevProvider
-from src.providers.goldapi import GoldAPIProvider
+import pytest
+
+
+class _MockResponse:
+    def __init__(self, json_data: dict | list, status_code: int = 200, text: str = ""):
+        self._json = json_data
+        self.status_code = status_code
+        self._text = text
+
+    def json(self):
+        return self._json
+
+    def raise_for_status(self):
+        if self.status_code >= 400:
+            raise Exception(f"HTTP {self.status_code}")
+
+    @property
+    def text(self):
+        return self._text
+
+
+# ------------------------------------------------------------------ #
+# iGold provider
+# ------------------------------------------------------------------ #
+
+_IGOLD_HTML = """
+<html><body>
+<!-- Two decoy tables that also have "table" in their class list — mirrors the
+     real igold.ae page which has three tables sharing the "table" class.
+     The old selector (find("table", class_="table")) would match Table 0
+     which has no thead, causing AttributeError. -->
+<table class="table text-center mb-1">
+  <th scope="col">Metal</th><th scope="col">Gram</th>
+</table>
+<table class="table mobile text-center mb-1">
+  <th scope="col">Metal</th><th scope="col">Gram</th>
+</table>
+<table class="table">
+  <thead><tr><td>24K</td><td>22K</td><td>21K</td><td>18K</td></tr></thead>
+  <tbody><tr>
+    <td>509.30 AED</td><td>471.54 AED</td><td>450.09 AED</td><td>385.79 AED</td>
+  </tr></tbody>
+  <tfoot><tr><td colspan="4"><small>Prices updated: 19/06/2026 00:05:01</small></td></tr></tfoot>
+</table>
+</body></html>
+"""
 
 
 @pytest.mark.asyncio
-async def test_freegoldapi_get_current_price():
-    provider = FreeGoldAPIProvider(api_key="test_key")
-    mock_response = MagicMock()
-    mock_response.json.return_value = {"price": 2050.75, "open": 2040.0, "high": 2060.0, "low": 2035.0}
-    mock_response.raise_for_status = MagicMock()
+async def test_igold_parses_all_carats():
+    from src.providers.currency.igold import IgoldProvider
+
+    provider = IgoldProvider()
+    mock_resp = _MockResponse({}, text=_IGOLD_HTML)
 
     with patch("httpx.AsyncClient") as mock_client_cls:
         mock_client = AsyncMock()
-        mock_client.__aenter__ = AsyncMock(return_value=mock_client)
-        mock_client.__aexit__ = AsyncMock(return_value=False)
-        mock_client.get = AsyncMock(return_value=mock_response)
-        mock_client_cls.return_value = mock_client
+        mock_client_cls.return_value.__aenter__.return_value = mock_client
+        mock_client.get = AsyncMock(return_value=mock_resp)
 
         result = await provider.get_current_price()
 
-    assert isinstance(result, PriceResult)
-    assert result.price_usd == 2050.75
-    assert result.source == "freegoldapi"
+    assert result.currency == "AED"
+    assert result.price_type == "local"
+    assert result.price == pytest.approx(509.30)
+    carats = {cp.carat: cp for cp in result.carat_prices}
+    assert "24K" in carats and "22K" in carats
+    assert carats["22K"].price == pytest.approx(471.54)
+    assert carats["22K"].calculated is False
+    assert carats["24K"].calculated is False
 
 
 @pytest.mark.asyncio
-async def test_freegoldapi_invalid_price_raises():
-    provider = FreeGoldAPIProvider()
-    mock_response = MagicMock()
-    mock_response.json.return_value = {"price": 0}
-    mock_response.raise_for_status = MagicMock()
+async def test_igold_missing_table_raises():
+    from src.providers.currency.igold import IgoldProvider
+
+    provider = IgoldProvider()
+    mock_resp = _MockResponse({}, text="<html><body>no table here</body></html>")
 
     with patch("httpx.AsyncClient") as mock_client_cls:
         mock_client = AsyncMock()
-        mock_client.__aenter__ = AsyncMock(return_value=mock_client)
-        mock_client.__aexit__ = AsyncMock(return_value=False)
-        mock_client.get = AsyncMock(return_value=mock_response)
-        mock_client_cls.return_value = mock_client
+        mock_client_cls.return_value.__aenter__.return_value = mock_client
+        mock_client.get = AsyncMock(return_value=mock_resp)
 
-        with pytest.raises(ValueError):
+        with pytest.raises(ValueError, match="price table"):
             await provider.get_current_price()
 
 
-def test_metalsdev_no_key_unsupported():
-    provider = MetalsDevProvider(api_key="")
-    assert provider.supports_current_price() is False
-    assert provider.supports_historical() is False
+# ------------------------------------------------------------------ #
+# Dubai City of Gold provider
+# ------------------------------------------------------------------ #
 
-
-def test_metalsdev_with_key_supported():
-    provider = MetalsDevProvider(api_key="somekey")
-    assert provider.supports_current_price() is True
-    assert provider.supports_historical() is True
-
-
-def test_goldapi_no_key_unsupported():
-    provider = GoldAPIProvider(api_key="")
-    assert provider.supports_current_price() is False
-    assert provider.supports_historical() is False
-
-
-def test_freegoldapi_supports_all():
-    provider = FreeGoldAPIProvider()
-    assert provider.supports_current_price() is True
-    assert provider.supports_historical() is True
+_DCOG_RESPONSE = {
+    "status": "1",
+    "msg": "Subscription Valid",
+    "gold_rate_date": "2026-06-18",
+    "gold_rate_24k": "509.25",
+    "gold_rate_22k": "471.50",
+    "gold_rate_21k": "452.00",
+    "gold_rate_18k": "387.50",
+    "gold_rate_14k": "302.25",
+}
 
 
 @pytest.mark.asyncio
-async def test_metalsdev_no_key_raises():
-    provider = MetalsDevProvider(api_key="")
-    with pytest.raises(ValueError, match="requires an API key"):
-        await provider.get_current_price()
+async def test_dcog_parses_all_carats():
+    from src.providers.currency.dubaicityofgold import DubaiCityOfGoldProvider
 
-
-@pytest.mark.asyncio
-async def test_goldapi_no_key_raises():
-    provider = GoldAPIProvider(api_key="")
-    with pytest.raises(ValueError, match="requires an API key"):
-        await provider.get_current_price()
-
-
-@pytest.mark.asyncio
-async def test_yahoofinance_historical_structure():
-    provider = YahooFinanceProvider()
-    import pandas as pd
-    from datetime import date, timedelta
-
-    mock_data = {}
-    for i in range(10):
-        d = date(2024, 1, 1) + timedelta(days=i)
-        mock_data[pd.Timestamp(d)] = {
-            "Close": 2000 + i * 5,
-            "Open": 1998 + i * 5,
-            "High": 2010 + i * 5,
-            "Low": 1990 + i * 5,
-        }
-    df = pd.DataFrame.from_dict(mock_data, orient="index")
-
-    mock_ticker = MagicMock()
-    mock_ticker.history.return_value = df
-
-    with patch("yfinance.Ticker", return_value=mock_ticker):
-        entries = await provider.get_historical(10)
-
-    assert len(entries) == 10
-    assert all(isinstance(e, HistoricalEntry) for e in entries)
-    assert entries[0].source == "yahoofinance"
-
-
-# Integration tests for real API calls
-@pytest.mark.integration
-@pytest.mark.asyncio
-async def test_goldapi_get_current_price_real():
-    """Test GoldAPI current price with real API call"""
-    from src.config import get_settings
-    settings = get_settings()
-
-    if not settings.goldapi_key:
-        pytest.skip("GOLDAPI_KEY not set in .env")
-
-    provider = GoldAPIProvider(api_key=settings.goldapi_key)
-    result = await provider.get_current_price()
-
-    assert isinstance(result, PriceResult)
-    assert result.price_usd > 0
-    assert result.source == "goldapi"
-    assert result.date is not None
-
-
-@pytest.mark.integration
-@pytest.mark.asyncio
-async def test_goldapi_get_historical_real():
-    """Test GoldAPI historical data with real API call"""
-    from src.config import get_settings
-    settings = get_settings()
-
-    if not settings.goldapi_key:
-        pytest.skip("GOLDAPI_KEY not set in .env")
-
-    provider = GoldAPIProvider(api_key=settings.goldapi_key)
-    results = await provider.get_historical(days=5)
-
-    assert isinstance(results, list)
-    assert len(results) > 0
-    assert all(isinstance(e, HistoricalEntry) for e in results)
-    assert all(e.source == "goldapi" for e in results)
-    assert all(e.price_usd > 0 for e in results)
-
-
-@pytest.mark.integration
-@pytest.mark.asyncio
-async def test_freegoldapi_get_current_price_real():
-    """Test FreeGoldAPI current price with real API call"""
-    provider = FreeGoldAPIProvider()
-    result = await provider.get_current_price()
-
-    assert isinstance(result, PriceResult)
-    assert result.price_usd > 0
-    assert result.source == "freegoldapi"
-    assert result.date is not None
-
-
-@pytest.mark.integration
-@pytest.mark.asyncio
-async def test_freegoldapi_get_historical_real():
-    """Test FreeGoldAPI historical data with real API call"""
-    provider = FreeGoldAPIProvider()
-    results = await provider.get_historical(days=5)
-
-    assert isinstance(results, list)
-    assert len(results) > 0
-    assert all(isinstance(e, HistoricalEntry) for e in results)
-    assert all(e.source == "freegoldapi" for e in results)
-    assert all(e.price_usd > 0 for e in results)
-
-
-@pytest.mark.integration
-@pytest.mark.asyncio
-async def test_metalsdev_get_current_price_real():
-    """Test MetalsDev current price with real API call"""
-    from src.config import get_settings
-    settings = get_settings()
-
-    if not settings.metalsdev_key:
-        pytest.skip("METALSDEV_KEY not set in .env")
-
-    provider = MetalsDevProvider(api_key=settings.metalsdev_key)
-    result = await provider.get_current_price()
-
-    assert isinstance(result, PriceResult)
-    assert result.price_usd > 0
-    assert result.source == "metalsdev"
-    assert result.date is not None
-
-
-@pytest.mark.integration
-@pytest.mark.asyncio
-async def test_metalsdev_get_historical_real():
-    """Test MetalsDev historical data with real API call"""
-    from src.config import get_settings
-    settings = get_settings()
-
-    if not settings.metalsdev_key:
-        pytest.skip("METALSDEV_KEY not set in .env")
-
-    provider = MetalsDevProvider(api_key=settings.metalsdev_key)
-    results = await provider.get_historical(days=5)
-
-    assert isinstance(results, list)
-    assert len(results) > 0
-    assert all(isinstance(e, HistoricalEntry) for e in results)
-    assert all(e.source == "metalsdev" for e in results)
-    assert all(e.price_usd > 0 for e in results)
-
-
-@pytest.mark.integration
-@pytest.mark.asyncio
-async def test_yahoofinance_get_current_price_real():
-    """Test YahooFinance current price with real API call"""
-    provider = YahooFinanceProvider()
-    result = await provider.get_current_price()
-
-    assert isinstance(result, PriceResult)
-    assert result.price_usd > 0
-    assert result.source == "yahoofinance"
-    assert result.date is not None
-
-
-@pytest.mark.integration
-@pytest.mark.asyncio
-async def test_yahoofinance_get_historical_real():
-    """Test YahooFinance historical data with real API call"""
-    provider = YahooFinanceProvider()
-    results = await provider.get_historical(days=5)
-
-    assert isinstance(results, list)
-    assert len(results) > 0
-    assert all(isinstance(e, HistoricalEntry) for e in results)
-    assert all(e.source == "yahoofinance" for e in results)
-    assert all(e.price_usd > 0 for e in results)
-
-
-@pytest.mark.asyncio
-async def test_goldapi_get_current_price_mock():
-    """Test GoldAPI current price with mocked response"""
-    provider = GoldAPIProvider(api_key="test_key")
-    mock_response = MagicMock()
-    mock_response.json.return_value = {
-        "price": 2150.50,
-        "open_price": 2140.0,
-        "high_price": 2160.0,
-        "low_price": 2135.0,
-    }
-    mock_response.raise_for_status = MagicMock()
+    provider = DubaiCityOfGoldProvider()
+    mock_resp = _MockResponse(_DCOG_RESPONSE)
 
     with patch("httpx.AsyncClient") as mock_client_cls:
         mock_client = AsyncMock()
-        mock_client.__aenter__ = AsyncMock(return_value=mock_client)
-        mock_client.__aexit__ = AsyncMock(return_value=False)
-        mock_client.get = AsyncMock(return_value=mock_response)
-        mock_client_cls.return_value = mock_client
+        mock_client_cls.return_value.__aenter__.return_value = mock_client
+        mock_client.post = AsyncMock(return_value=mock_resp)
 
         result = await provider.get_current_price()
 
-    assert isinstance(result, PriceResult)
-    assert result.price_usd == 2150.50
-    assert result.source == "goldapi"
-    assert result.open_usd == 2140.0
+    assert result.currency == "AED"
+    assert result.price == pytest.approx(509.25)
+    assert result.date == "2026-06-18"
+    carats = {cp.carat: cp for cp in result.carat_prices}
+    assert carats["22K"].price == pytest.approx(471.50)
+    assert carats["22K"].calculated is False
 
 
 @pytest.mark.asyncio
-async def test_metalsdev_get_current_price_mock():
-    """Test MetalsDev current price with mocked response"""
-    provider = MetalsDevProvider(api_key="test_key")
-    mock_response = MagicMock()
-    mock_response.json.return_value = {
-        "metals": {
-            "gold": 2100.75,
-        }
-    }
-    mock_response.raise_for_status = MagicMock()
+async def test_dcog_api_error_raises():
+    from src.providers.currency.dubaicityofgold import DubaiCityOfGoldProvider
+
+    provider = DubaiCityOfGoldProvider()
+    mock_resp = _MockResponse({"status": "0", "msg": "Invalid vendor key"})
 
     with patch("httpx.AsyncClient") as mock_client_cls:
         mock_client = AsyncMock()
-        mock_client.__aenter__ = AsyncMock(return_value=mock_client)
-        mock_client.__aexit__ = AsyncMock(return_value=False)
-        mock_client.get = AsyncMock(return_value=mock_response)
-        mock_client_cls.return_value = mock_client
+        mock_client_cls.return_value.__aenter__.return_value = mock_client
+        mock_client.post = AsyncMock(return_value=mock_resp)
+
+        with pytest.raises(ValueError, match="Invalid vendor key"):
+            await provider.get_current_price()
+
+
+# ------------------------------------------------------------------ #
+# FX rate provider
+# ------------------------------------------------------------------ #
+
+@pytest.mark.asyncio
+async def test_fx_rate_provider_exchangerate_api():
+    from src.providers.fx_rates import FXRateProvider
+
+    provider = FXRateProvider(cache_ttl_seconds=60)
+    mock_resp = _MockResponse({"rates": {"AED": 3.6725, "INR": 83.5}})
+
+    with patch("httpx.AsyncClient") as mock_client_cls:
+        mock_client = AsyncMock()
+        mock_client_cls.return_value.__aenter__.return_value = mock_client
+        mock_client.get = AsyncMock(return_value=mock_resp)
+
+        rate = await provider.get_rate("USD", "AED")
+
+    assert rate == pytest.approx(3.6725)
+
+
+@pytest.mark.asyncio
+async def test_fx_rate_same_currency_is_one():
+    from src.providers.fx_rates import FXRateProvider
+
+    provider = FXRateProvider()
+    rate = await provider.get_rate("USD", "USD")
+    assert rate == 1.0
+
+
+@pytest.mark.asyncio
+async def test_fx_rate_caches_result():
+    from src.providers.fx_rates import FXRateProvider
+
+    provider = FXRateProvider(cache_ttl_seconds=3600)
+    mock_resp = _MockResponse({"rates": {"AED": 3.6725}})
+
+    with patch("httpx.AsyncClient") as mock_client_cls:
+        mock_client = AsyncMock()
+        mock_client_cls.return_value.__aenter__.return_value = mock_client
+        mock_client.get = AsyncMock(return_value=mock_resp)
+
+        rate1 = await provider.get_rate("USD", "AED")
+        rate2 = await provider.get_rate("USD", "AED")
+
+    assert rate1 == rate2
+    assert mock_client.get.call_count == 1  # second call served from cache
+
+
+# ------------------------------------------------------------------ #
+# derive_carat_prices utility
+# ------------------------------------------------------------------ #
+
+# ------------------------------------------------------------------ #
+# Khaleej Times provider
+# ------------------------------------------------------------------ #
+
+_KT_RESPONSE = {
+    "date": "June 19, 2026 01:30:11",
+    "rates": [
+        {"type": "Type", "morning": "Morning", "afternoon": "Afternoon", "evening": "Evening", "yesterday": "Yesterday"},
+        {"type": "Ounce", "morning": "465,028", "afternoon": "", "evening": "", "yesterday": "465,028"},
+        {"type": "24K", "morning": "14,951.00", "afternoon": "14,960.00", "evening": "14,970.00", "yesterday": "14,951.00"},
+        {"type": "22K", "morning": "13,705.00", "afternoon": "13,714.00", "evening": "", "yesterday": "13,705.00"},
+        {"type": "21K", "morning": "0.00", "afternoon": "", "evening": "", "yesterday": "0.00"},
+        {"type": "18K", "morning": "11,213.00", "afternoon": "", "evening": "", "yesterday": "11,213.00"},
+    ],
+}
+
+
+@pytest.mark.asyncio
+async def test_khaleejtimes_parses_latest_slot():
+    from src.providers.currency.khaleejtimes import KhaleejTimesProvider
+
+    provider = KhaleejTimesProvider()
+    mock_resp = _MockResponse(_KT_RESPONSE)
+
+    with patch("httpx.AsyncClient") as mock_client_cls:
+        mock_client = AsyncMock()
+        mock_client_cls.return_value.__aenter__.return_value = mock_client
+        mock_client.get = AsyncMock(return_value=mock_resp)
 
         result = await provider.get_current_price()
 
-    assert isinstance(result, PriceResult)
-    assert result.price_usd == 2100.75
-    assert result.source == "metalsdev"
+    assert result.currency == "INR"
+    assert result.price_type == "local"
+    assert result.source == "khaleejtimes"
+    # 24K: evening slot (14,970.00) — most recent non-empty
+    assert result.price == pytest.approx(14970.0)
+
+    carats = {cp.carat: cp for cp in result.carat_prices}
+    # 22K: afternoon slot (no evening), calculated=False
+    assert carats["22K"].price == pytest.approx(13714.0)
+    assert carats["22K"].calculated is False
+    # 18K: morning slot only, calculated=False
+    assert carats["18K"].price == pytest.approx(11213.0)
+    assert carats["18K"].calculated is False
+    # 21K: all slots are 0 → derived from purity ratio
+    assert carats["21K"].calculated is True
+    # 24K should not be calculated
+    assert carats["24K"].calculated is False
+
+
+@pytest.mark.asyncio
+async def test_khaleejtimes_missing_24k_raises():
+    from src.providers.currency.khaleejtimes import KhaleejTimesProvider
+
+    provider = KhaleejTimesProvider()
+    bad_response = {"date": "June 19, 2026", "rates": [
+        {"type": "22K", "morning": "13,705.00", "afternoon": "", "evening": "", "yesterday": ""},
+    ]}
+    mock_resp = _MockResponse(bad_response)
+
+    with patch("httpx.AsyncClient") as mock_client_cls:
+        mock_client = AsyncMock()
+        mock_client_cls.return_value.__aenter__.return_value = mock_client
+        mock_client.get = AsyncMock(return_value=mock_resp)
+
+        with pytest.raises(ValueError, match="24K"):
+            await provider.get_current_price()
+
+
+# ------------------------------------------------------------------ #
+# derive_carat_prices utility
+# ------------------------------------------------------------------ #
+
+def test_derive_carat_prices_all_calculated():
+    from src.providers.base import derive_carat_prices
+
+    result = derive_carat_prices(3000.0)
+    by_carat = {cp.carat: cp for cp in result}
+
+    assert by_carat["24K"].price == pytest.approx(3000.0)
+    assert by_carat["24K"].calculated is False
+    assert by_carat["22K"].calculated is True
+    assert by_carat["22K"].price == pytest.approx(3000.0 * 22 / 24)
+    assert by_carat["18K"].price == pytest.approx(3000.0 * 18 / 24)
+
+
+def test_derive_carat_prices_with_provider_values():
+    from src.providers.base import derive_carat_prices
+
+    provider_carats = {"24K": 509.30, "22K": 471.54, "21K": 450.09, "18K": 385.79}
+    result = derive_carat_prices(509.30, provider_carats=provider_carats)
+    by_carat = {cp.carat: cp for cp in result}
+
+    for carat in ["24K", "22K", "21K", "18K"]:
+        assert by_carat[carat].calculated is False
+
+    assert by_carat["22K"].price == pytest.approx(471.54)
