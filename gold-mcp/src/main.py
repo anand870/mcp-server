@@ -4,111 +4,122 @@ import os
 import sys
 from pathlib import Path
 
-_PROJECT_ROOT = Path(__file__).parent.parent.resolve()
-os.chdir(_PROJECT_ROOT)
-sys.path.insert(0, str(_PROJECT_ROOT))
+# Anchor CWD to project root so relative paths (data/, .env) resolve correctly
+# regardless of where the MCP client launches this process from.
+os.chdir(Path(__file__).parent.parent.resolve())
+sys.path.insert(0, str(Path(__file__).parent.parent.resolve()))
+
+from src.utils.logging import configure_logging, get_logger
+
+configure_logging()
+logger = get_logger(__name__)
 
 from fastmcp import FastMCP
 
-from src.config import get_config
 from src.database import init_db
-from src.tools.analysis_tools import analyze_buy_opportunity
+from src.tools.accuracy_tools import get_recommendation_accuracy
+from src.tools.analysis_tools import analyze_buy_opportunity, get_gold_indicators
 from src.tools.history_tools import get_gold_history
-from src.tools.indicator_tools import get_gold_indicators
-from src.tools.price_tools import get_gold_price
-from src.tools.prices_tools import get_gold_prices
+from src.tools.price_tools import get_gold_price, get_gold_prices
 from src.tools.summary_tools import get_market_summary
-from src.utils.logging import configure_logging, get_logger
-
-config = get_config()
-configure_logging(
-    level=config.logging.level,
-    fmt=config.logging.format,
-    log_file=config.logging.log_file,
-    max_bytes=config.logging.log_file_max_bytes,
-    backup_count=config.logging.log_file_backup_count,
-)
-logger = get_logger(__name__)
 
 init_db()
+logger.info("gold_advisor_v2_db_initialized")
 
 mcp = FastMCP(
-    name=config.server.name,
-    instructions=config.server.description,
+    name="gold-advisor-v2",
+    instructions=(
+        "Read-only MCP server for gold price data, historical trends, "
+        "technical indicators (MA7/MA30/MA90/RSI14), and buy recommendations. "
+        "All data is read from a shared PostgreSQL database."
+    ),
 )
 
 
 @mcp.tool(description=(
-    "Fetch the current gold price for the given currency and carat. "
-    "currency: USD, AED, INR (default: configured default_currency). "
-    "carat: 24K, 22K, 21K, 18K (default: configured default_carat)."
+    "Fetch the current gold price for a given currency and carat. "
+    "Returns the price for the requested carat plus all other carats on the same date. "
+    "currency: USD, AED, INR (default: AED). carat: 24K, 22K, 21K, 18K (default: 24K)."
 ))
-async def tool_get_gold_price(currency: str = "", carat: str = "") -> dict:
-    return await get_gold_price(currency=currency or None, carat=carat or None)
+def tool_get_gold_price(currency: str = "AED", carat: str = "24K") -> dict:
+    return get_gold_price(currency=currency, carat=carat)
 
 
 @mcp.tool(description=(
-    "Fetch current gold prices for all enabled currencies and all standard carats (24K/22K/21K/18K). "
-    "Returns a nested dict: {currency: {carat: {price, calculated}}}."
+    "Fetch latest gold prices for all currencies (USD, AED, INR) "
+    "and all carats (24K, 22K, 21K, 18K). "
+    "Returns a nested dict: {currency: {carat: {price, calculated, source, date}}}."
 ))
-async def tool_get_gold_prices() -> dict:
-    return await get_gold_prices()
+def tool_get_gold_prices() -> dict:
+    return get_gold_prices()
 
 
 @mcp.tool(description=(
-    "Fetch historical gold prices for a given period and currency/carat. "
-    "period: 30d, 90d, 1y, 5y, 10y. "
-    "currency: USD, AED, INR. carat: 24K, 22K, 21K, 18K."
+    "Fetch historical gold prices for a given period. "
+    "period: 30d, 90d, 1y, 5y, 10y (default: 30d). "
+    "currency: USD, AED, INR (default: USD). carat: 24K, 22K, 21K, 18K (default: 24K)."
 ))
-async def tool_get_gold_history(period: str = "90d", currency: str = "", carat: str = "") -> dict:
-    return await get_gold_history(period, currency=currency or None, carat=carat or None)
+def tool_get_gold_history(period: str = "30d", currency: str = "USD", carat: str = "24K") -> dict:
+    return get_gold_history(period=period, currency=currency, carat=carat)
 
 
 @mcp.tool(description=(
     "Return the latest computed technical indicators for gold (USD 24K basis): "
     "MA7, MA30, MA90, RSI(14), and trend direction."
 ))
-async def tool_get_gold_indicators() -> dict:
-    return await get_gold_indicators()
+def tool_get_gold_indicators() -> dict:
+    return get_gold_indicators()
 
 
 @mcp.tool(description=(
     "Analyze whether now is a good time to buy gold. "
-    "Score (0-100) is always based on USD 24K indicators. "
-    "Price in response reflects the requested currency/carat. "
-    "currency: USD, AED, INR. carat: 24K, 22K, 21K, 18K."
+    "Score (0-100) based on USD 24K indicators. "
+    "Display price reflects the requested currency/carat. "
+    "Saves the result to recommendation_history. "
+    "currency: USD, AED, INR (default: AED). carat: 24K, 22K, 21K, 18K (default: 24K)."
 ))
-async def tool_analyze_buy_opportunity(currency: str = "", carat: str = "") -> dict:
-    return await analyze_buy_opportunity(currency=currency or None, carat=carat or None)
+def tool_analyze_buy_opportunity(currency: str = "AED", carat: str = "24K") -> dict:
+    return analyze_buy_opportunity(currency=currency, carat=carat)
 
 
 @mcp.tool(description=(
-    "Return a concise market summary for all configured currencies, "
+    "Return a concise market summary for all currencies, "
     "suitable for Telegram or AI agent chat. "
-    "Shows prices, provider source, and buy recommendation."
+    "Includes latest prices, current indicators, and buy recommendation."
 ))
-async def tool_get_market_summary() -> dict:
-    return await get_market_summary()
+def tool_get_market_summary() -> dict:
+    return get_market_summary()
+
+
+@mcp.tool(description=(
+    "Evaluate the accuracy of past buy/avoid recommendations by comparing "
+    "the price at recommendation time against the actual price after horizon_days. "
+    "Returns per-type hit rates, average return for BUY/STRONG_BUY signals, "
+    "and a full entry list. horizon_days: lookback horizon in days (default: 30)."
+))
+def tool_get_recommendation_accuracy(horizon_days: int = 30) -> dict:
+    return get_recommendation_accuracy(horizon_days=horizon_days)
 
 
 def _run_http() -> None:
     import uvicorn
     from src.http_server import app
-    logger.info("gold_advisor_http_starting", host=config.http.host, port=config.http.port)
-    uvicorn.run(app, host=config.http.host, port=config.http.port)
+    logger.info("gold_advisor_v2_http_starting", host="0.0.0.0", port=8080)
+    uvicorn.run(app, host="0.0.0.0", port=8080)
 
 
 def _run_mcp() -> None:
-    logger.info("gold_advisor_mcp_starting", name=config.server.name, version=config.server.version)
+    logger.info("gold_advisor_v2_mcp_starting")
     mcp.run()
 
 
 if __name__ == "__main__":
     import argparse
-    parser = argparse.ArgumentParser(description="Gold Advisor server")
+
+    parser = argparse.ArgumentParser(description="Gold Advisor v2 server")
     group = parser.add_mutually_exclusive_group()
-    group.add_argument("--http", action="store_true", help="Run as HTTP REST server")
-    group.add_argument("--all", action="store_true", help="Run both MCP (stdio) and HTTP concurrently")
+    group.add_argument("--http", action="store_true", help="Run HTTP REST server only (with Swagger at /docs)")
+    group.add_argument("--all", action="store_true", help="Run MCP (stdio) + HTTP concurrently")
     args = parser.parse_args()
 
     if args.http:

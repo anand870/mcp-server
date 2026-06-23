@@ -1,66 +1,51 @@
 services:
-  gold-mcp:
-    build: .
-    container_name: gold-advisor-mcp
+  postgres:
+    image: postgres:16-alpine
+    container_name: gold-db
     restart: unless-stopped
     environment:
-      - FREEGOLDAPI_KEY=${FREEGOLDAPI_KEY:-}
-      - METALSDEV_KEY=${METALSDEV_KEY:-}
-      - GOLDAPI_KEY=${GOLDAPI_KEY:-}
-      - LOG_LEVEL=${LOG_LEVEL:-INFO}
-      - PYTHONPATH=/app
+      POSTGRES_DB: gold_db
+      POSTGRES_USER: gold_admin
+      POSTGRES_PASSWORD: gold_admin_password
+    ports:
+      - "5436:5432"
     volumes:
-      - gold_data:/app/data
-      - ./config.yaml:/app/config.yaml:ro
+      - gold_pg_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U gold_admin -d gold_db"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  gold-mcp-v2:
+    build: .
+    container_name: gold-advisor-v2-mcp
+    restart: unless-stopped
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      - DATABASE_URL=postgresql://gold_admin:gold_admin_password@postgres:5432/gold_db
+      - PYTHONPATH=/app
     stdin_open: true
     tty: true
 
-  gold-http:
+  gold-http-v2:
     build: .
-    container_name: gold-advisor-http
+    container_name: gold-advisor-v2-http
     restart: unless-stopped
     command: ["python", "-m", "src.main", "--http"]
+    depends_on:
+      postgres:
+        condition: service_healthy
     ports:
       - "${HTTP_PORT:-8080}:8080"
     environment:
-      - FREEGOLDAPI_KEY=${FREEGOLDAPI_KEY:-}
-      - METALSDEV_KEY=${METALSDEV_KEY:-}
-      - GOLDAPI_KEY=${GOLDAPI_KEY:-}
-      - LOG_LEVEL=${LOG_LEVEL:-INFO}
+      - DATABASE_URL=postgresql://gold_admin:gold_admin_password@postgres:5432/gold_db
       - PYTHONPATH=/app
-    volumes:
-      - gold_data:/app/data
-      - ./config.yaml:/app/config.yaml:ro
     profiles:
       - http
 
-  backfill:
-    build: .
-    container_name: gold-advisor-backfill
-    profiles:
-      - tools
-    environment:
-      - FREEGOLDAPI_KEY=${FREEGOLDAPI_KEY:-}
-      - METALSDEV_KEY=${METALSDEV_KEY:-}
-      - GOLDAPI_KEY=${GOLDAPI_KEY:-}
-      - PYTHONPATH=/app
-    volumes:
-      - gold_data:/app/data
-      - ./config.yaml:/app/config.yaml:ro
-    command: ["python", "scripts/backfill_history.py", "--days", "365"]
-
-  migrate:
-    build: .
-    container_name: gold-advisor-migrate
-    profiles:
-      - tools
-    environment:
-      - PYTHONPATH=/app
-    volumes:
-      - gold_data:/app/data
-      - ./config.yaml:/app/config.yaml:ro
-    command: ["python", "scripts/migrate_db.py"]
-
 volumes:
-  gold_data:
+  gold_pg_data:
     driver: local

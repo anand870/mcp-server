@@ -1,42 +1,61 @@
 from __future__ import annotations
 
-import os
-import sys
-from pathlib import Path
-
 import pytest
+from sqlalchemy import create_engine
+from sqlalchemy.orm import sessionmaker
 
-sys.path.insert(0, str(Path(__file__).parent.parent))
-
-from src.database import init_db
+from src.models import Base
 
 
-def pytest_addoption(parser):
-    parser.addoption(
-        "--run-live",
-        action="store_true",
-        default=False,
-        help="Run tests marked with @pytest.mark.live (hits real external APIs)",
+@pytest.fixture(scope="session")
+def engine():
+    eng = create_engine("sqlite:///:memory:", connect_args={"check_same_thread": False})
+    Base.metadata.create_all(eng)
+    yield eng
+    eng.dispose()
+
+
+@pytest.fixture
+def session(engine):
+    SessionLocal = sessionmaker(bind=engine, autoflush=False, autocommit=False, expire_on_commit=False)
+    sess = SessionLocal()
+    yield sess
+    sess.rollback()
+    sess.close()
+
+
+@pytest.fixture
+def gold_price_row(session):
+    from src.models import GoldPrice
+
+    row = GoldPrice(
+        date="2024-06-01",
+        currency="USD",
+        carat="24K",
+        price=85.50,
+        open=85.00,
+        high=86.00,
+        low=84.50,
+        source="test",
+        price_type="local",
+        calculated=False,
     )
+    session.add(row)
+    session.commit()
+    return row
 
 
-def pytest_collection_modifyitems(config, items):
-    run_live = config.getoption("--run-live") or os.getenv("PYTEST_LIVE") == "1"
-    if not run_live:
-        skip = pytest.mark.skip(reason="Live network test — run with --run-live or PYTEST_LIVE=1")
-        for item in items:
-            if item.get_closest_marker("live"):
-                item.add_marker(skip)
+@pytest.fixture
+def indicator_row(session):
+    from src.models import GoldIndicator
 
-
-@pytest.fixture(autouse=True)
-def use_temp_db(tmp_path, monkeypatch):
-    db_path = str(tmp_path / "test_gold.db")
-    monkeypatch.setenv("DATABASE_PATH", db_path)
-
-    import src.config as cfg_module
-    cfg_module._config = None
-
-    init_db(db_path)
-    yield
-    cfg_module._config = None
+    row = GoldIndicator(
+        date="2024-06-01",
+        ma7=84.0,
+        ma30=87.0,
+        ma90=90.0,
+        rsi14=32.0,
+    )
+    session.add(row)
+    session.commit()
+    return row

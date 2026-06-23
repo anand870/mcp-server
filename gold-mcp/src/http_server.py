@@ -1,267 +1,389 @@
 from __future__ import annotations
 
-from fastapi import FastAPI, Query
-from fastapi.responses import JSONResponse
+from datetime import datetime, timedelta
 
-from src.config import get_config
+from fastapi import FastAPI, HTTPException, Query
+
+from src.config import get_settings
+from src.database import GoldPriceRepository, session_scope
 from src.schemas import (
     BuyOpportunityResponse,
+    CaratPriceDetail,
     ErrorResponse,
+    GoldHistoryEntry,
     GoldHistoryResponse,
     GoldIndicatorsResponse,
     GoldPriceResponse,
     MarketSummaryResponse,
+    RecommendationAccuracyResponse,
 )
-from src.services.gold_service import GoldService
-from src.services.indicator_service import IndicatorService
-from src.services.recommendation_service import RecommendationService
+from src.services.indicator_service import get_latest_indicators
+from src.services.recommendation_service import analyze_buy_opportunity as _analyze
+from src.tools.accuracy_tools import get_recommendation_accuracy
 from src.utils.logging import get_logger
 
 logger = get_logger(__name__)
 
-config = get_config()
+PERIOD_DAYS: dict[str, int] = {
+    "30d": 30,
+    "90d": 90,
+    "1y": 365,
+    "5y": 1825,
+    "10y": 3650,
+}
 
-_DESCRIPTION = """
-Gold price intelligence and buy-opportunity analysis — REST API.
-
-## Prices
-Fetch real-time gold prices in **USD**, **AED**, or **INR** for any purity (24K, 22K, 21K, 18K).
-Local market providers are used where available (iGold / Dubai City of Gold for AED;
-Metals.dev for INR); USD conversion is the fallback.
-
-## Analysis
-Technical indicators (MA7, MA30, MA90, RSI) and a scored buy recommendation
-are always computed on **USD 24K** data for consistency. The requested
-currency/carat price is displayed alongside the score.
-
-## History
-Prices are persisted in SQLite. Run `scripts/backfill_history.py` to seed
-historical data before using the `/history` and `/indicators` endpoints.
-"""
+_ERR = {
+    404: {"model": ErrorResponse},
+    503: {"model": ErrorResponse},
+}
 
 app = FastAPI(
-    title="Gold Advisor API",
-    version=config.server.version,
-    description=_DESCRIPTION,
-    contact={"name": "Gold Advisor", "url": "https://github.com/"},
-    license_info={"name": "MIT"},
-    openapi_tags=[
-        {"name": "prices", "description": "Real-time gold price data"},
-        {"name": "history", "description": "Historical price records"},
-        {"name": "analysis", "description": "Technical indicators and buy recommendations"},
-        {"name": "meta", "description": "Health and server information"},
-    ],
+    title="Gold Advisor API v2",
+    description=(
+        "Read-only REST API for gold prices, historical trends, "
+        "technical indicators, and buy recommendations.\n\n"
+        "All data is served from a shared PostgreSQL database. "
+        "No external API calls are made at request time."
+    ),
+    version="2.0.0",
+    docs_url="/docs",
+    redoc_url="/redoc",
 )
 
 
-def _err(msg: str, status: int = 500) -> JSONResponse:
-    return JSONResponse(
-        ErrorResponse(error=msg).model_dump(),
-        status_code=status,
-    )
-
-
-@app.get(
-    "/health",
-    tags=["meta"],
-    summary="Server health check",
-    response_description="Service status and version",
-)
-async def health():
-    """Returns `ok` when the server is running."""
-    return {"status": "ok", "version": config.server.version, "source": "gold-advisor"}
+@app.get("/health", tags=["Meta"], summary="Health check")
+def health() -> dict:
+    """Returns `{"status": "ok"}` when the server is running."""
+    return {"status": "ok"}
 
 
 @app.get(
     "/price",
-    tags=["prices"],
-    summary="Current gold price",
     response_model=GoldPriceResponse,
-    responses={500: {"model": ErrorResponse}},
-    response_description="Spot price for the requested currency and carat",
+    responses=_ERR,
+    tags=["Prices"],
+    summary="Current gold price for one currency and carat",
 )
-async def price(
-    currency: str | None = Query(
-        default=None,
-        description=f"Target currency. Defaults to `{config.default_currency}`. Supported: USD, AED, INR.",
+def get_gold_price(
+    currency: str = Query(
+        default="AED",
+        description="Currency code",
         examples={"AED": {"value": "AED"}, "USD": {"value": "USD"}, "INR": {"value": "INR"}},
     ),
-    carat: str | None = Query(
-        default=None,
-        description=f"Gold purity. Defaults to `{config.default_carat}`. Supported: 24K, 22K, 21K, 18K.",
-        examples={"24K": {"value": "24K"}, "22K": {"value": "22K"}},
+    carat: str = Query(
+        default="24K",
+        description="Gold purity",
+        examples={"24K": {"value": "24K"}, "22K": {"value": "22K"}, "18K": {"value": "18K"}},
     ),
-):
+) -> GoldPriceResponse:
     """
-    Fetch the current gold spot price.
+    Returns the latest price for the requested `currency`/`carat` pair,
+    plus prices for all other carats on the same date.
 
-    - **currency**: USD (freegoldapi / metalsdev), AED (iGold / Dubai City of Gold), INR (Metals.dev)
-    - **carat**: 24K is always provider-supplied; lower carats may be derived via purity ratios
-    - **price_type**: `local` (native provider) or `converted` (FX-derived from USD)
-    - **all_carats**: prices for all purities returned in a single call
+    | Field        | Description                          |
+    |--------------|--------------------------------------|
+    | `price`      | Price per gram in requested currency |
+    | `all_carats` | All 4 carats available on that date  |
+    | `calculated` | `true` if derived via FX conversion  |
     """
-    try:
-        result = await GoldService().get_current_price(currency=currency, carat=carat)
-        return result
-    except Exception as exc:
-        logger.error("http_error", endpoint="/price", error=str(exc))
-        return _err(str(exc))
+    settings = get_settings()
+    currency = (currency or settings.default_currency).upper()
+    carat = (carat or settings.default_carat).upper()
+
+    logger.info("http_get_gold_price", currency=currency, carat=carat)
+
+    with session_scope() as session:
+        repo = GoldPriceRepository(session)
+        latest_date = repo.get_latest_date_for_currency(currency)
+        if latest_date is None:
+            raise HTTPException(status_code=404, detail=f"No data for currency {currency}")
+        rows = repo.get_by_date_and_currency(latest_date, currency)
+
+    primary = next((r for r in rows if r.carat == carat), None)
+    if primary is None:
+        raise HTTPException(status_code=404, detail=f"No data for {currency} {carat} on {latest_date}")
+
+    all_carats = [CaratPriceDetail(carat=r.carat, price=r.price, calculated=r.calculated) for r in rows]
+    return GoldPriceResponse(
+        price=primary.price,
+        currency=primary.currency,
+        carat=primary.carat,
+        price_type=primary.price_type,
+        date=primary.date,
+        source=primary.source,
+        timestamp=datetime.utcnow().isoformat() + "Z",
+        all_carats=all_carats,
+        open=primary.open,
+        high=primary.high,
+        low=primary.low,
+    )
 
 
 @app.get(
     "/prices",
-    tags=["prices"],
-    summary="All currencies and carats",
-    response_description="Nested map of currency → carat → price detail",
-    responses={500: {"model": ErrorResponse}},
+    response_model=dict,
+    responses=_ERR,
+    tags=["Prices"],
+    summary="Latest prices for all currencies and carats",
 )
-async def prices():
+def get_gold_prices() -> dict:
     """
-    Fetch current prices for **all** enabled currencies and carats in one call.
+    Returns the most recent price for every `currency × carat` combination.
 
-    Returns a nested object: `{ "AED": { "24K": {...}, "22K": {...} }, "USD": { ... } }`.
+    Shape: `{ "USD": { "24K": { price, calculated, source, date }, ... }, ... }`
     """
-    try:
-        result = await GoldService().get_all_current_prices()
-        return {
-            currency: {carat: detail.model_dump() for carat, detail in carats.items()}
-            for currency, carats in result.items()
+    settings = get_settings()
+    logger.info("http_get_gold_prices")
+
+    with session_scope() as session:
+        repo = GoldPriceRepository(session)
+        rows = repo.get_latest_per_currency_carat(settings.supported_currencies, settings.supported_carats)
+
+    result: dict = {}
+    for row in rows:
+        result.setdefault(row.currency, {})[row.carat] = {
+            "price": row.price,
+            "calculated": row.calculated,
+            "source": row.source,
+            "date": row.date,
         }
-    except Exception as exc:
-        logger.error("http_error", endpoint="/prices", error=str(exc))
-        return _err(str(exc))
+    return result
 
 
 @app.get(
     "/history",
-    tags=["history"],
-    summary="Historical gold prices",
     response_model=GoldHistoryResponse,
-    responses={400: {"model": ErrorResponse}, 500: {"model": ErrorResponse}},
-    response_description="Daily price records for the requested period",
+    responses=_ERR,
+    tags=["Prices"],
+    summary="Historical gold prices for a given period",
 )
-async def history(
+def get_gold_history(
     period: str = Query(
-        default="90d",
-        description="Lookback window. One of: `30d`, `90d`, `1y`, `5y`, `10y`.",
+        default="30d",
+        description="Lookback window",
         examples={
+            "30d": {"value": "30d"},
             "90d": {"value": "90d"},
             "1y": {"value": "1y"},
             "5y": {"value": "5y"},
+            "10y": {"value": "10y"},
         },
     ),
-    currency: str | None = Query(
-        default=None,
-        description=f"Currency filter. Defaults to `{config.default_currency}`.",
+    currency: str = Query(
+        default="USD",
+        description="Currency code",
+        examples={"USD": {"value": "USD"}, "AED": {"value": "AED"}, "INR": {"value": "INR"}},
     ),
-    carat: str | None = Query(
-        default=None,
-        description=f"Carat filter. Defaults to `{config.default_carat}`.",
+    carat: str = Query(
+        default="24K",
+        description="Gold purity",
+        examples={"24K": {"value": "24K"}, "22K": {"value": "22K"}},
     ),
-):
+) -> GoldHistoryResponse:
     """
-    Return daily closing prices from the local SQLite database.
+    Returns daily OHLC-style records for the given `currency`/`carat` over `period`.
 
-    Seed data first with `python scripts/backfill_history.py --days 365`.
+    | Period | Days  |
+    |--------|-------|
+    | 30d    | 30    |
+    | 90d    | 90    |
+    | 1y     | 365   |
+    | 5y     | 1 825 |
+    | 10y    | 3 650 |
     """
-    from src.tools.history_tools import VALID_PERIODS
+    currency = currency.upper()
+    carat = carat.upper()
+    days = PERIOD_DAYS.get(period, 30)
+    end_date = datetime.utcnow().date()
+    start_date = end_date - timedelta(days=days)
 
-    days = VALID_PERIODS.get(period)
-    if days is None:
-        return _err(f"Invalid period '{period}'. Valid: {list(VALID_PERIODS.keys())}", status=400)
-    try:
-        result = await GoldService().get_history(days, currency=currency, carat=carat)
-        return result
-    except Exception as exc:
-        logger.error("http_error", endpoint="/history", error=str(exc))
-        return _err(str(exc))
+    logger.info("http_get_gold_history", period=period, currency=currency, carat=carat)
+
+    with session_scope() as session:
+        repo = GoldPriceRepository(session)
+        rows = repo.get_range(
+            start_date=start_date.isoformat(),
+            end_date=end_date.isoformat(),
+            currency=currency,
+            carat=carat,
+        )
+
+    if not rows:
+        raise HTTPException(status_code=404, detail=f"No history for {currency} {carat} in {period}")
+
+    entries = [
+        GoldHistoryEntry(
+            date=r.date, price=r.price, currency=r.currency, carat=r.carat,
+            price_type=r.price_type, source=r.source,
+            open=r.open, high=r.high, low=r.low,
+        )
+        for r in rows
+    ]
+    return GoldHistoryResponse(
+        entries=entries,
+        period_days=days,
+        start_date=start_date.isoformat(),
+        end_date=end_date.isoformat(),
+        count=len(entries),
+        currency=currency,
+        carat=carat,
+    )
 
 
 @app.get(
     "/indicators",
-    tags=["analysis"],
-    summary="Technical indicators",
     response_model=GoldIndicatorsResponse,
-    responses={404: {"model": ErrorResponse}, 500: {"model": ErrorResponse}},
-    response_description="MA7, MA30, MA90, RSI(14), and trend — always USD 24K",
+    responses=_ERR,
+    tags=["Analysis"],
+    summary="Latest technical indicators (MA7 / MA30 / MA90 / RSI14)",
 )
-async def indicators():
+def get_gold_indicators() -> GoldIndicatorsResponse:
     """
-    Return the latest computed technical indicators.
+    Returns the most recently computed indicators derived from USD 24K prices.
 
-    Indicators are always computed on **USD 24K** data regardless of your
-    `default_currency` config. Run `python scripts/refresh_history.py` to
-    recompute after loading new price data.
+    | Indicator | Description                        |
+    |-----------|------------------------------------|
+    | `ma7`     | 7-day simple moving average        |
+    | `ma30`    | 30-day simple moving average       |
+    | `ma90`    | 90-day simple moving average       |
+    | `rsi14`   | 14-period RSI (Wilder smoothing)   |
+    | `trend`   | Bullish / Bearish / Neutral-*      |
     """
-    try:
-        result = IndicatorService().get_latest_indicators()
-        if result is None:
-            return _err("No indicator data. Run scripts/refresh_history.py first.", status=404)
-        return result
-    except Exception as exc:
-        logger.error("http_error", endpoint="/indicators", error=str(exc))
-        return _err(str(exc))
+    logger.info("http_get_gold_indicators")
+    indicators = get_latest_indicators()
+    if indicators is None:
+        raise HTTPException(status_code=404, detail="No indicator data in database")
+    return indicators
 
 
 @app.get(
-    "/analysis",
-    tags=["analysis"],
-    summary="Buy opportunity analysis",
+    "/buy",
     response_model=BuyOpportunityResponse,
-    responses={500: {"model": ErrorResponse}},
-    response_description="Scored buy recommendation with full reasoning",
+    responses=_ERR,
+    tags=["Analysis"],
+    summary="Analyze buy opportunity and return a scored recommendation",
 )
-async def analysis(
-    currency: str | None = Query(
-        default=None,
-        description=f"Display currency. Defaults to `{config.default_currency}`. Score is always USD 24K based.",
+def analyze_buy_opportunity(
+    currency: str = Query(
+        default="AED",
+        description="Currency for the display price in the response",
+        examples={"AED": {"value": "AED"}, "USD": {"value": "USD"}, "INR": {"value": "INR"}},
     ),
-    carat: str | None = Query(
-        default=None,
-        description=f"Display carat. Defaults to `{config.default_carat}`.",
+    carat: str = Query(
+        default="24K",
+        description="Carat for the display price in the response",
+        examples={"24K": {"value": "24K"}, "22K": {"value": "22K"}},
     ),
-):
+) -> BuyOpportunityResponse:
     """
-    Score-based buy opportunity analysis (0–100).
+    Scores the current market conditions on a 0-100 scale using USD 24K indicators.
 
-    | Score | Recommendation |
-    |-------|---------------|
-    | 0–30  | AVOID |
-    | 31–60 | WAIT |
-    | 61–80 | BUY |
-    | 81–100 | STRONG_BUY |
+    | Score  | Recommendation |
+    |--------|---------------|
+    | 0–30   | AVOID         |
+    | 31–60  | WAIT          |
+    | 61–80  | BUY           |
+    | 81–100 | STRONG_BUY    |
 
-    The **score** and **indicators** are always computed on USD 24K. The
-    `price` and `currency` fields in the response reflect your requested display currency/carat.
+    The result is persisted to `recommendation_history`.
     """
+    logger.info("http_analyze_buy_opportunity", currency=currency, carat=carat)
     try:
-        result = await RecommendationService().analyze_buy_opportunity(
-            currency=currency, carat=carat
-        )
-        return result
-    except Exception as exc:
-        logger.error("http_error", endpoint="/analysis", error=str(exc))
-        return _err(str(exc))
+        return _analyze(currency=currency.upper(), carat=carat.upper())
+    except RuntimeError as e:
+        raise HTTPException(status_code=503, detail=str(e))
 
 
 @app.get(
     "/summary",
-    tags=["prices"],
-    summary="Multi-currency market summary",
     response_model=MarketSummaryResponse,
-    responses={500: {"model": ErrorResponse}},
-    response_description="Concise summary across all currencies, suitable for Telegram",
+    responses=_ERR,
+    tags=["Analysis"],
+    summary="Full market summary (Telegram-ready markdown + structured data)",
 )
-async def summary():
+def get_market_summary() -> MarketSummaryResponse:
     """
-    One-shot market snapshot across all enabled currencies.
+    Combines latest prices for all currencies, current indicators,
+    and a buy score into a single response.
 
-    Returns a `text` field formatted for Telegram/Slack alongside structured
-    price data and the current buy score.
+    The `text` field is formatted as Telegram-compatible markdown.
     """
-    from src.tools.summary_tools import get_market_summary
+    settings = get_settings()
+    logger.info("http_get_market_summary")
 
-    result = await get_market_summary()
-    if "error" in result:
-        return _err(result["error"])
-    return result
+    with session_scope() as session:
+        repo = GoldPriceRepository(session)
+        rows = repo.get_latest_per_currency_carat(settings.supported_currencies, settings.supported_carats)
+
+    prices: dict[str, dict[str, CaratPriceDetail]] = {}
+    latest_date = ""
+    for row in rows:
+        prices.setdefault(row.currency, {})[row.carat] = CaratPriceDetail(
+            carat=row.carat, price=row.price, calculated=row.calculated
+        )
+        if row.date > latest_date:
+            latest_date = row.date
+
+    indicators = get_latest_indicators()
+    trend = indicators.trend if indicators else "Unknown"
+    rsi14 = indicators.rsi14 if indicators else None
+
+    try:
+        rec = _analyze(currency=settings.default_currency, carat=settings.default_carat)
+        buy_score = rec.score
+        recommendation = rec.recommendation
+    except RuntimeError:
+        buy_score = 0
+        recommendation = "UNKNOWN"
+
+    lines = [f"*Gold Market Summary* — {latest_date}", ""]
+    for currency in settings.supported_currencies:
+        if currency not in prices:
+            continue
+        lines.append(f"*{currency}*")
+        for carat in settings.supported_carats:
+            if carat not in prices[currency]:
+                continue
+            d = prices[currency][carat]
+            calc_tag = " _(calc)_" if d.calculated else ""
+            lines.append(f"  {carat}: {d.price:,.2f}{calc_tag}")
+        lines.append("")
+    lines.append(f"*Trend:* {trend}")
+    if rsi14 is not None:
+        lines.append(f"*RSI(14):* {rsi14:.1f}")
+    lines.append(f"*Buy Score:* {buy_score}/100 → *{recommendation}*")
+
+    return MarketSummaryResponse(
+        text="\n".join(lines),
+        prices={c: {k: v.model_dump() for k, v in carats.items()} for c, carats in prices.items()},
+        buy_score=buy_score,
+        recommendation=recommendation,
+        trend=trend,
+        rsi14=rsi14,
+        date=latest_date,
+    )
+
+
+@app.get(
+    "/accuracy",
+    response_model=RecommendationAccuracyResponse,
+    responses=_ERR,
+    tags=["Analysis"],
+    summary="Evaluate accuracy of past buy/avoid recommendations",
+)
+def accuracy(horizon_days: int = Query(default=30, ge=1, description="Days after recommendation to check outcome")) -> RecommendationAccuracyResponse:
+    """
+    For each past recommendation whose horizon has elapsed, looks up the actual
+    gold price (USD 24K) at `horizon_days` after the recommendation date and
+    determines whether it was correct.
+
+    | Recommendation | Correct if...           |
+    |----------------|-------------------------|
+    | BUY / STRONG_BUY | price went up        |
+    | AVOID          | price went down         |
+    | WAIT           | not evaluated (no direction) |
+
+    Returns per-type hit rates, average return for BUY signals, and full entry list.
+    """
+    logger.info("http_get_recommendation_accuracy", horizon_days=horizon_days)
+    return get_recommendation_accuracy(horizon_days=horizon_days)

@@ -51,7 +51,7 @@ class GoldHistoryResponse(BaseModel):
 
 class GoldIndicatorsResponse(BaseModel):
     date: str
-    price_usd_gram: float = Field(description="USD 24K spot price per gram")
+    price_usd_gram: float = Field(description="USD 24K spot price in per-gram units")
     unit: str = "gram"
     ma7: float | None = None
     ma30: float | None = None
@@ -75,7 +75,7 @@ class BuyOpportunityResponse(BaseModel):
     currency: str
     carat: str
     unit: str = "gram"
-    price_usd_gram: float = Field(description="USD 24K spot price used for scoring")
+    price_usd_gram: float = Field(description="USD 24K spot price in per-gram units used for scoring")
     score: int
     recommendation: str
     reasoning: list[str]
@@ -99,32 +99,3 @@ class ErrorResponse(BaseModel):
     error: str
     detail: str | None = None
     source: str = "gold-advisor"
-
-
-class RecommendationAccuracyEntry(BaseModel):
-    rec_date: str
-    price_at_rec: float
-    recommendation: str
-    score: int
-    outcome_price: float | None = None
-    outcome_date: str | None = None
-    return_pct: float | None = None
-    was_correct: bool | None = None
-
-
-class AccuracyByType(BaseModel):
-    count: int
-    correct: int
-    hit_rate: float | None = None
-    avg_return_pct: float | None = None
-
-
-class RecommendationAccuracyResponse(BaseModel):
-    horizon_days: int
-    evaluated_count: int
-    pending_count: int
-    overall_hit_rate: float | None = None
-    avg_return_pct: float | None = None
-    by_recommendation: dict[str, AccuracyByType]
-    entries: list[RecommendationAccuracyEntry]
-    source: str = "gold-mcp"

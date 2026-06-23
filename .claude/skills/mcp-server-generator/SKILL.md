@@ -91,6 +91,23 @@ Containerization:
 
 ---
 
+# CWD Anchoring
+
+Always add the following at the top of `src/main.py` so the server runs from
+the project root regardless of how the client launches it:
+
+```python
+import os
+from pathlib import Path
+os.chdir(Path(__file__).parent.parent.resolve())
+```
+
+Required because clients like Hermes Agent launch the MCP process from a
+different working directory, which breaks relative paths to `config.yaml`,
+`data/`, and the SQLite database.
+
+---
+
 # Required Project Structure
 
 Always generate:
@@ -346,6 +363,17 @@ Log:
 
 Use structured logs.
 
+All log output MUST go to `stderr` and/or a rotating log file. NEVER write log
+output to `stdout`. `stdout` is the MCP transport channel — any non-JSON-RPC
+bytes written to it will corrupt the protocol and break all MCP clients.
+
+Implement a dual-sink logger:
+
+* stderr (for terminal visibility)
+* rotating file at `data/<server-name>.log`
+
+Both sinks must be configured before any provider or service is imported.
+
 ---
 
 # Testing Requirements
@@ -359,6 +387,37 @@ Always generate tests for:
 * Scoring logic
 
 Use pytest.
+
+---
+
+# HTTP Server
+
+Always generate a FastAPI HTTP server alongside the MCP server.
+
+File: `src/http_server.py`
+
+Requirements:
+
+* Mirrors every MCP tool as a GET endpoint
+* Full Swagger UI at `/docs`, ReDoc at `/redoc`
+* `response_model=` on every endpoint so Swagger renders full response schemas
+* `responses={4xx/5xx: {"model": ErrorResponse}}` on every endpoint
+* Tag groups matching tool categories (e.g. `prices`, `history`, `analysis`, `meta`)
+* Descriptive docstrings with Markdown tables where applicable
+* All query params have `description=` and `examples=`
+* `GET /health` endpoint always included
+
+Run modes in `src/main.py`:
+
+```bash
+python -m src.main          # MCP stdio only
+python -m src.main --http   # HTTP only (port from config)
+python -m src.main --all    # both simultaneously
+```
+
+Add an `http` profile service in `docker-compose.yml` that exposes the HTTP port.
+
+Add to `requirements.txt`: `fastapi>=0.111.0` and `uvicorn[standard]>=0.30.0`.
 
 ---
 
@@ -397,6 +456,7 @@ Always generate:
 * Complete file contents
 * Complete schemas
 * Complete tests
+* All files in a single response — do not split generation across multiple turns
 
 Never generate:
 
